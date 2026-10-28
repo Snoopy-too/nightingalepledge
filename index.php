@@ -24,7 +24,7 @@ $container->set(HtmlSanitizer::class, static function (): HtmlSanitizer {
 $container->set(PledgeRepositoryInterface::class, static function (): PledgeRepositoryInterface {
     return new LocalPledgeRepository(
         peaksJsonPath: __DIR__ . '/assets/audio/waveform_peaks.json',
-        publicAudioUrl: 'assets/audio/nightingale_pledge.wav'
+        publicAudioUrl: 'assets/audio/nightingale_pledge.mp3'
     );
 });
 
@@ -59,7 +59,7 @@ foreach ($segments as $seg) {
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <title>The Nightingale Pledge — 赤十字看護学校 発音・リズム練習スタジオ</title>
-    <link rel="stylesheet" href="assets/css/studio.css?v=1.2.0">
+    <link rel="stylesheet" href="assets/css/studio.css?v=1.3.0">
 </head>
 <body>
 
@@ -237,7 +237,10 @@ foreach ($segments as $seg) {
             </div>
 
             <!-- Native HTML5 Audio Element (Preloaded, Pitch-Preserved) -->
-            <audio id="pledgeAudio" preload="auto" src="<?= $sanitizer->escapeAttr((string) $audio['audioUrl']) ?>"></audio>
+            <audio id="pledgeAudio" preload="auto" src="<?= $sanitizer->escapeAttr((string) $audio['audioUrl']) ?>">
+                <source src="<?= $sanitizer->escapeAttr((string) $audio['audioUrl']) ?>" type="audio/mpeg">
+                <source src="assets/audio/nightingale_pledge.wav" type="audio/wav">
+            </audio>
         </section>
 
         <!-- Quick Focus: Tricky Vocabulary Chips & Student Saved Bookmarks -->
@@ -384,6 +387,6 @@ foreach ($segments as $seg) {
     </div>
 
     <script id="studio-boot-data" type="application/json"><?= $sanitizer->encodeSafeJson($sessionData) ?></script>
-    <script src="assets/js/studio.js?v=1.2.0" defer></script>
+    <script src="assets/js/studio.js?v=1.3.0" defer></script>
 </body>
 </html>

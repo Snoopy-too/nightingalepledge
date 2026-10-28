@@ -266,10 +266,9 @@
         duration: Number(audioMeta.duration) || 59.385,
         peaks: Array.isArray(audioMeta.peaks) ? audioMeta.peaks : [],
         rms: Array.isArray(audioMeta.rms) ? audioMeta.rms : [],
-        hiResChannelData: null,
-        hiResSampleRate: 44100,
 
         currentTime: 0,
+        pendingSeekTime: null,
         isPlaying: false,
         playbackRate: 1.0,
         practiceMode: "stop-ready",
@@ -562,15 +561,28 @@
         }
     }
 
+    function applyPendingSeek() {
+        if (state.pendingSeekTime === null || !audioEl || audioEl.readyState < 1) {
+            return;
+        }
+        const target = clamp(state.pendingSeekTime, 0, state.duration);
+        try {
+            if (Math.abs(audioEl.currentTime - target) > 0.01) {
+                audioEl.currentTime = target;
+            }
+            state.currentTime = target;
+            state.pendingSeekTime = null;
+        } catch (e) {
+            // Will retry once stream metadata is ready
+        }
+    }
+
     function seekTo(timeSec) {
         const target = clamp(timeSec, 0, state.duration);
         state.currentTime = target;
-        if (audioEl && Math.abs(audioEl.currentTime - target) > 0.01) {
-            try {
-                audioEl.currentTime = target;
-            } catch (e) {
-                // Ignore if audio metadata not yet loaded
-            }
+        state.pendingSeekTime = target;
+        if (audioEl && audioEl.readyState >= 1) {
+            applyPendingSeek();
         }
         updateTimeReadouts();
         updateLiveCaptionAndHighlight();
@@ -1022,7 +1034,6 @@
         const maxHalfHeight = (waveHeight / 2) * 0.88;
         const numBuckets = state.peaks.length;
         const viewSpan = state.viewEnd - state.viewStart;
-        const useHiRes = state.hiResChannelData && viewSpan < 22;
 
         for (let x = 0; x < width; x++) {
             const t0 = state.viewStart + (x / width) * viewSpan;
@@ -1031,46 +1042,39 @@
             let peakVal = 0;
             let rmsVal = 0;
 
-            if (useHiRes) {
-                const s0 = clamp(
-                    Math.floor(t0 * state.hiResSampleRate),
-                    0,
-                    state.hiResChannelData.length - 1
-                );
-                const s1 = clamp(
-                    Math.ceil(t1 * state.hiResSampleRate),
-                    s0 + 1,
-                    state.hiResChannelData.length
-                );
-                const step = Math.max(1, Math.floor((s1 - s0) / 32));
-                let sumSq = 0;
-                let count = 0;
-                for (let s = s0; s < s1; s += step) {
-                    const v = Math.abs(state.hiResChannelData[s]);
-                    if (v > peakVal) peakVal = v;
-                    sumSq += v * v;
-                    count++;
+            if (numBuckets > 0) {
+                const bucketSpan = ((t1 - t0) / state.duration) * numBuckets;
+                if (bucketSpan < 1.0) {
+                    const exactPos = (((t0 + t1) * 0.5) / state.duration) * (numBuckets - 1);
+                    const i0 = clamp(Math.floor(exactPos), 0, numBuckets - 1);
+                    const i1 = Math.min(numBuckets - 1, i0 + 1);
+                    const frac = exactPos - i0;
+                    const p0 = state.peaks[i0] || 0;
+                    const p1 = state.peaks[i1] || 0;
+                    const r0 = state.rms[i0] || 0;
+                    const r1 = state.rms[i1] || 0;
+                    peakVal = p0 + (p1 - p0) * frac;
+                    rmsVal = r0 + (r1 - r0) * frac;
+                } else {
+                    const b0 = clamp(
+                        Math.floor((t0 / state.duration) * numBuckets),
+                        0,
+                        numBuckets - 1
+                    );
+                    const b1 = clamp(
+                        Math.ceil((t1 / state.duration) * numBuckets),
+                        b0 + 1,
+                        numBuckets
+                    );
+                    let sumRms = 0;
+                    let count = 0;
+                    for (let b = b0; b < b1; b++) {
+                        if (state.peaks[b] > peakVal) peakVal = state.peaks[b];
+                        sumRms += state.rms[b] || 0;
+                        count++;
+                    }
+                    rmsVal = count > 0 ? sumRms / count : 0;
                 }
-                rmsVal = count > 0 ? Math.sqrt(sumSq / count) : 0;
-            } else if (numBuckets > 0) {
-                const b0 = clamp(
-                    Math.floor((t0 / state.duration) * numBuckets),
-                    0,
-                    numBuckets - 1
-                );
-                const b1 = clamp(
-                    Math.ceil((t1 / state.duration) * numBuckets),
-                    b0 + 1,
-                    numBuckets
-                );
-                let sumRms = 0;
-                let count = 0;
-                for (let b = b0; b < b1; b++) {
-                    if (state.peaks[b] > peakVal) peakVal = state.peaks[b];
-                    sumRms += state.rms[b] || 0;
-                    count++;
-                }
-                rmsVal = count > 0 ? sumRms / count : 0;
             }
 
             const inSel =
@@ -1399,9 +1403,6 @@
         newStart = clamp(newStart, 0, Math.max(0, state.duration - newSpan));
         state.viewStart = newStart;
         state.viewEnd = newStart + newSpan;
-        if (newSpan < 22) {
-            decodeHighResWaveformAsync();
-        }
         requestRender();
     }
 
@@ -1424,10 +1425,17 @@
                 rafId = null;
                 return;
             }
-            state.currentTime = audioEl.currentTime;
+            if (state.pendingSeekTime !== null) {
+                applyPendingSeek();
+            }
+            if (!audioEl.seeking && state.pendingSeekTime === null) {
+                state.currentTime = audioEl.currentTime;
+            }
 
             if (
                 state.dragMode === null &&
+                !audioEl.seeking &&
+                state.pendingSeekTime === null &&
                 hasActiveSelection() &&
                 state.currentTime >= state.selectionEnd - 0.015
             ) {
@@ -1484,14 +1492,20 @@
                 }
             }
             enforcePitchPreservation();
+            applyPendingSeek();
             updateTimeReadouts();
             requestRender();
+        });
+
+        audioEl.addEventListener("canplay", function () {
+            applyPendingSeek();
         });
 
         audioEl.addEventListener("play", function () {
             if (studentAudioEl && !studentAudioEl.paused) {
                 studentAudioEl.pause();
             }
+            applyPendingSeek();
             state.isPlaying = true;
             if (hasActiveSelection()) {
                 setStudioStatus(
@@ -1530,13 +1544,20 @@
         });
 
         audioEl.addEventListener("timeupdate", function () {
+            if (state.pendingSeekTime !== null) {
+                applyPendingSeek();
+            }
             if (!state.isPlaying) {
-                state.currentTime = audioEl.currentTime;
+                if (!audioEl.seeking && state.pendingSeekTime === null) {
+                    state.currentTime = audioEl.currentTime;
+                }
                 updateTimeReadouts();
                 requestRender();
             } else {
                 if (
                     state.dragMode === null &&
+                    !audioEl.seeking &&
+                    state.pendingSeekTime === null &&
                     hasActiveSelection() &&
                     audioEl.currentTime >= state.selectionEnd
                 ) {
@@ -1548,42 +1569,6 @@
                 }
             }
         });
-
-        audioEl.addEventListener(
-            "canplaythrough",
-            function () {
-                decodeHighResWaveformAsync();
-            },
-            { once: true }
-        );
-    }
-
-    let hiResDecodeStarted = false;
-    function decodeHighResWaveformAsync() {
-        if (hiResDecodeStarted || state.hiResChannelData) return;
-        const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-        const AudioCtx = window.AudioContext || window.webkitAudioContext;
-        if ((!OfflineCtx && !AudioCtx) || !audioMeta.audioUrl) return;
-        hiResDecodeStarted = true;
-
-        fetch(audioMeta.audioUrl, { cache: "force-cache" })
-            .then(function (res) {
-                return res.arrayBuffer();
-            })
-            .then(function (buf) {
-                const ctx = OfflineCtx ? new OfflineCtx(1, 1, 44100) : new AudioCtx();
-                return ctx.decodeAudioData(buf).then(function (audioBuffer) {
-                    state.hiResChannelData = audioBuffer.getChannelData(0);
-                    state.hiResSampleRate = audioBuffer.sampleRate;
-                    if (!OfflineCtx && typeof ctx.close === "function") {
-                        ctx.close();
-                    }
-                    requestRender();
-                });
-            })
-            .catch(function () {
-                hiResDecodeStarted = false;
-            });
     }
 
     // =========================================================================
@@ -1633,9 +1618,6 @@
             const pad = Math.max(0.6, (state.selectionEnd - state.selectionStart) * 0.25);
             state.viewStart = clamp(state.selectionStart - pad, 0, state.duration);
             state.viewEnd = clamp(state.selectionEnd + pad, 0, state.duration);
-            if (state.viewEnd - state.viewStart < 22) {
-                decodeHighResWaveformAsync();
-            }
             requestRender();
         });
     }
