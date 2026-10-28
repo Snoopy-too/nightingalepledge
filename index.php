@@ -59,7 +59,7 @@ foreach ($segments as $seg) {
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <title>The Nightingale Pledge — 赤十字看護学校 発音・リズム練習スタジオ</title>
-    <link rel="stylesheet" href="assets/css/studio.css?v=1.1.0">
+    <link rel="stylesheet" href="assets/css/studio.css?v=1.2.0">
 </head>
 <body>
 
@@ -384,6 +384,6 @@ foreach ($segments as $seg) {
     </div>
 
     <script id="studio-boot-data" type="application/json"><?= $sanitizer->encodeSafeJson($sessionData) ?></script>
-    <script src="assets/js/studio.js?v=1.1.0" defer></script>
+    <script src="assets/js/studio.js?v=1.2.0" defer></script>
 </body>
 </html>

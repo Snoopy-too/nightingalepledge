@@ -16,7 +16,7 @@ final class GetPracticeStudioSessionUseCase
      * @return array{
      *   audio: array<string, mixed>,
      *   segments: list<array<string, int|float|string>>,
-     *   sentences: list<array{partNumber: int, title: string, startTime: float, endTime: float, text: string}>
+     *   sentences: list<array{partNumber: int, title: string, titleJa: string, startTime: float, endTime: float, text: string}>
      * }
      */
     public function execute(): array

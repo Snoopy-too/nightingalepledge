@@ -35,14 +35,24 @@ final class LocalPledgeRepository implements PledgeRepositoryInterface
                     $channels = isset($decoded['channels']) ? (int) $decoded['channels'] : $channels;
 
                     if (isset($decoded['peaks']) && is_array($decoded['peaks'])) {
-                        foreach ($decoded['peaks'] as $val) {
-                            $peaks[] = (float) $val;
+                        $rawPeaks = isset($decoded['peaks']['value']) && is_array($decoded['peaks']['value'])
+                            ? $decoded['peaks']['value']
+                            : $decoded['peaks'];
+                        foreach ($rawPeaks as $val) {
+                            if (is_int($val) || is_float($val) || (is_string($val) && is_numeric($val))) {
+                                $peaks[] = (float) $val;
+                            }
                         }
                     }
 
                     if (isset($decoded['rms']) && is_array($decoded['rms'])) {
-                        foreach ($decoded['rms'] as $val) {
-                            $rms[] = (float) $val;
+                        $rawRms = isset($decoded['rms']['value']) && is_array($decoded['rms']['value'])
+                            ? $decoded['rms']['value']
+                            : $decoded['rms'];
+                        foreach ($rawRms as $val) {
+                            if (is_int($val) || is_float($val) || (is_string($val) && is_numeric($val))) {
+                                $rms[] = (float) $val;
+                            }
                         }
                     }
                 }

@@ -16,7 +16,7 @@ interface PledgeRepositoryInterface
     public function getSegments(): array;
 
     /**
-     * @return list<array{partNumber: int, title: string, startTime: float, endTime: float, text: string}>
+     * @return list<array{partNumber: int, title: string, titleJa: string, startTime: float, endTime: float, text: string}>
      */
     public function getSentenceGroups(): array;
 }

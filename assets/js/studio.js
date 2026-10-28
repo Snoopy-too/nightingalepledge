@@ -245,6 +245,8 @@
     const trickyContainer = document.getElementById("trickyPresetsContainer");
     const bookmarksContainer = document.getElementById("customBookmarksContainer");
     const saveBookmarkBtn = document.getElementById("saveBookmarkBtn");
+    const recordSelfBtn = document.getElementById("recordSelfBtn");
+    const studentAudioEl = document.getElementById("studentAudioPlayback");
 
     // Modal DOM
     const studioModal = document.getElementById("studioModal");
@@ -302,13 +304,13 @@
     }
 
     function formatTime(sec) {
-        const safe = Math.max(0, Number(sec) || 0);
-        const mins = Math.floor(safe / 60);
-        const rem = safe - mins * 60;
-        const wholeSec = Math.floor(rem);
-        const tenths = Math.floor((rem - wholeSec) * 100);
+        const totalCs = Math.max(0, Math.round((Number(sec) || 0) * 100));
+        const mins = Math.floor(totalCs / 6000);
+        const remCs = totalCs % 6000;
+        const wholeSec = Math.floor(remCs / 100);
+        const cs = remCs % 100;
         const secStr = wholeSec < 10 ? "0" + wholeSec : String(wholeSec);
-        const msStr = tenths < 10 ? "0" + tenths : String(tenths);
+        const msStr = cs < 10 ? "0" + cs : String(cs);
         return mins + ":" + secStr + "." + msStr;
     }
 
@@ -492,6 +494,25 @@
         });
     }
 
+    function ensureRangeVisible(startSec, endSec) {
+        let span = state.viewEnd - state.viewStart;
+        if (span >= state.duration - 0.05) return;
+
+        if (startSec >= state.viewStart && endSec <= state.viewEnd) {
+            return;
+        }
+
+        const selLen = Math.max(0, endSec - startSec);
+        if (selLen + 0.8 > span) {
+            span = clamp(selLen * 1.25, MIN_ZOOM_WINDOW_SEC, state.duration);
+        }
+
+        const center = (startSec + endSec) * 0.5;
+        const newStart = clamp(center - span * 0.5, 0, Math.max(0, state.duration - span));
+        state.viewStart = newStart;
+        state.viewEnd = newStart + span;
+    }
+
     function setSelection(startSec, endSec, options) {
         const opts = options || {};
         cancelShadowWait();
@@ -515,7 +536,12 @@
         } else {
             state.selectionStart = s;
             state.selectionEnd = e;
-            state.customHintOverride = opts.hint || null;
+            if (!opts.preserveHint) {
+                state.customHintOverride = opts.hint || null;
+            }
+            if (opts.ensureVisible !== false) {
+                ensureRangeVisible(s, e);
+            }
             if (opts.snapPlayhead !== false) {
                 seekTo(s);
             }
@@ -527,11 +553,12 @@
         if (opts.autoPlay && hasActiveSelection()) {
             playFromSelectionStart();
         } else if (hasActiveSelection()) {
-            setStudioStatus(
-                "ready",
-                "statusSelectionReady",
-                "(" + formatTime(state.selectionStart) + " – " + formatTime(state.selectionEnd) + ")"
-            );
+            const rangeText = "(" + formatTime(state.selectionStart) + " – " + formatTime(state.selectionEnd) + ")";
+            if (audioEl && !audioEl.paused) {
+                setStudioStatus("playing", "statusPlayingSelection", rangeText);
+            } else {
+                setStudioStatus("ready", "statusSelectionReady", rangeText);
+            }
         }
     }
 
@@ -634,11 +661,12 @@
     }
 
     function handleSelectionBoundaryReached() {
-        if (!hasActiveSelection()) return;
+        if (!hasActiveSelection() || state.dragMode !== null) return;
 
         const selDurationSec = state.selectionEnd - state.selectionStart;
 
         if (state.practiceMode === "stop-ready") {
+            cancelShadowWait();
             audioEl.pause();
             seekTo(state.selectionStart);
             setStudioStatus(
@@ -648,11 +676,16 @@
             );
             updateTransportButtons();
         } else if (state.practiceMode === "loop") {
+            cancelShadowWait();
             seekTo(state.selectionStart);
             if (audioEl.paused) {
                 audioEl.play().catch(function () {});
+            } else {
+                startHighFreqMonitor();
             }
         } else if (state.practiceMode === "shadow") {
+            if (state.isShadowWaiting) return;
+            cancelShadowWait();
             audioEl.pause();
             seekTo(state.selectionStart);
             const waitMs = Math.max(1200, Math.round((selDurationSec / state.playbackRate) * 1000));
@@ -738,6 +771,14 @@
             const s = segments[i];
             if (tSec >= s.startTime - 0.15 && tSec <= s.endTime + 0.15) {
                 return s;
+            }
+        }
+        // Hold current clause across brief natural breathing pauses between adjacent clauses
+        for (let i = 0; i < segments.length - 1; i++) {
+            const curr = segments[i];
+            const next = segments[i + 1];
+            if (tSec > curr.endTime && tSec < next.startTime && next.startTime - curr.endTime <= 1.25) {
+                return curr;
             }
         }
         return null;
@@ -905,6 +946,26 @@
         ctx.restore();
     }
 
+    function fillRoundedRect(ctx, x, y, w, h, r) {
+        const radius = Math.max(0, Math.min(r, w / 2, h / 2));
+        ctx.beginPath();
+        if (typeof ctx.roundRect === "function") {
+            ctx.roundRect(x, y, w, h, radius);
+        } else {
+            ctx.moveTo(x + radius, y);
+            ctx.lineTo(x + w - radius, y);
+            ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+            ctx.lineTo(x + w, y + h - radius);
+            ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+            ctx.lineTo(x + radius, y + h);
+            ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+            ctx.lineTo(x, y + radius);
+            ctx.quadraticCurveTo(x, y, x + radius, y);
+            ctx.closePath();
+        }
+        ctx.fill();
+    }
+
     function renderMainWaveform() {
         if (!waveformCanvas) return;
         const dpr = window.devicePixelRatio || 1;
@@ -1051,14 +1112,17 @@
             minorStep = 0.5;
         }
 
-        const firstTick = Math.floor(state.viewStart / minorStep) * minorStep;
+        const startStepIdx = Math.max(0, Math.floor(state.viewStart / minorStep));
+        const endStepIdx = Math.ceil(state.viewEnd / minorStep);
+        const majorEvery = Math.max(1, Math.round(majorStep / minorStep));
         ctx.font = "600 11px ui-monospace, SFMono-Regular, Menlo, monospace";
         ctx.textBaseline = "middle";
 
-        for (let tickTime = firstTick; tickTime <= state.viewEnd; tickTime += minorStep) {
-            if (tickTime < 0) continue;
+        for (let stepIdx = startStepIdx; stepIdx <= endStepIdx; stepIdx++) {
+            const tickTime = stepIdx * minorStep;
+            if (tickTime < 0 || tickTime > state.viewEnd + 0.0001) continue;
             const tx = Math.floor(timeToX(tickTime, width)) + 0.5;
-            const isMajor = Math.abs(tickTime / majorStep - Math.round(tickTime / majorStep)) < 0.01;
+            const isMajor = stepIdx % majorEvery === 0;
 
             ctx.strokeStyle = isMajor ? "#64748b" : "#334155";
             ctx.beginPath();
@@ -1087,9 +1151,7 @@
                 ctx.stroke();
 
                 ctx.fillStyle = "#facc15";
-                ctx.beginPath();
-                ctx.roundRect(selX1 - 2, waveTop + 4, 28, 22, 4);
-                ctx.fill();
+                fillRoundedRect(ctx, selX1 - 2, waveTop + 4, 28, 22, 4);
                 ctx.fillStyle = "#0f172a";
                 ctx.font = "800 10px sans-serif";
                 ctx.fillText("IN ◄", selX1 + 2, waveTop + 15);
@@ -1102,9 +1164,7 @@
                 ctx.stroke();
 
                 ctx.fillStyle = "#facc15";
-                ctx.beginPath();
-                ctx.roundRect(selX2 - 32, height - 26, 34, 22, 4);
-                ctx.fill();
+                fillRoundedRect(ctx, selX2 - 32, height - 26, 34, 22, 4);
                 ctx.fillStyle = "#0f172a";
                 ctx.font = "800 10px sans-serif";
                 ctx.fillText("► OUT", selX2 - 29, height - 15);
@@ -1142,6 +1202,7 @@
 
         waveformCanvas.addEventListener("pointerdown", function (ev) {
             if (ev.button !== undefined && ev.button !== 0) return;
+            cancelShadowWait();
             activePointerId = ev.pointerId;
             waveformCanvas.setPointerCapture(ev.pointerId);
 
@@ -1157,6 +1218,9 @@
                 const selX1 = timeToX(state.selectionStart, width);
                 const selX2 = timeToX(state.selectionEnd, width);
                 if (Math.abs(x - selX1) <= 22) {
+                    if (audioEl && !audioEl.paused) {
+                        audioEl.pause();
+                    }
                     state.dragMode = "move-start";
                     return;
                 }
@@ -1206,6 +1270,9 @@
                 requestRender();
             } else if (state.dragMode === "create-selection") {
                 if (Math.abs(x - state.pointerDownX) > 6) {
+                    if (audioEl && !audioEl.paused) {
+                        audioEl.pause();
+                    }
                     const s = Math.min(state.dragAnchorTime, pointerTime);
                     const e = Math.max(state.dragAnchorTime, pointerTime);
                     state.selectionStart = clamp(s, 0, state.duration);
@@ -1222,8 +1289,12 @@
             const rect = waveformCanvas.getBoundingClientRect();
             const x = ev.clientX - rect.left;
             const movedPx = Math.abs(x - state.pointerDownX);
+            const finishedMode = state.dragMode;
 
-            if (state.dragMode === "create-selection") {
+            state.dragMode = null;
+            activePointerId = null;
+
+            if (finishedMode === "create-selection") {
                 if (movedPx <= 6) {
                     seekTo(state.dragAnchorTime);
                 } else if (hasActiveSelection()) {
@@ -1233,20 +1304,31 @@
                         "statusSelectionReady",
                         "(" + formatTime(state.selectionStart) + " – " + formatTime(state.selectionEnd) + ")"
                     );
+                } else {
+                    state.selectionStart = null;
+                    state.selectionEnd = null;
+                    state.customHintOverride = null;
+                    seekTo(state.dragAnchorTime);
                 }
-            } else if (state.dragMode === "move-start" || state.dragMode === "move-end") {
+            } else if (finishedMode === "move-start" || finishedMode === "move-end") {
                 if (hasActiveSelection()) {
-                    seekTo(state.selectionStart);
-                    setStudioStatus(
-                        "ready",
-                        "statusSelectionAdjusted",
-                        "(" + formatTime(state.selectionStart) + " – " + formatTime(state.selectionEnd) + ")"
-                    );
+                    if (!audioEl || audioEl.paused) {
+                        seekTo(state.selectionStart);
+                        setStudioStatus(
+                            "ready",
+                            "statusSelectionAdjusted",
+                            "(" + formatTime(state.selectionStart) + " – " + formatTime(state.selectionEnd) + ")"
+                        );
+                    } else {
+                        setStudioStatus(
+                            "playing",
+                            "statusPlayingSelection",
+                            "(" + formatTime(state.selectionStart) + " – " + formatTime(state.selectionEnd) + ")"
+                        );
+                    }
                 }
             }
 
-            state.dragMode = null;
-            activePointerId = null;
             updateSelectionUI();
             requestRender();
         }
@@ -1288,6 +1370,7 @@
         }
 
         minimapCanvas.addEventListener("pointerdown", function (ev) {
+            if (ev.button !== undefined && ev.button !== 0) return;
             draggingMinimap = true;
             minimapCanvas.setPointerCapture(ev.pointerId);
             centerViewportAtEvent(ev);
@@ -1298,9 +1381,12 @@
             centerViewportAtEvent(ev);
         });
 
-        minimapCanvas.addEventListener("pointerup", function () {
+        function stopMinimapDrag() {
             draggingMinimap = false;
-        });
+        }
+
+        minimapCanvas.addEventListener("pointerup", stopMinimapDrag);
+        minimapCanvas.addEventListener("pointercancel", stopMinimapDrag);
     }
 
     function zoomByFactor(factor) {
@@ -1313,6 +1399,9 @@
         newStart = clamp(newStart, 0, Math.max(0, state.duration - newSpan));
         state.viewStart = newStart;
         state.viewEnd = newStart + newSpan;
+        if (newSpan < 22) {
+            decodeHighResWaveformAsync();
+        }
         requestRender();
     }
 
@@ -1337,21 +1426,45 @@
             }
             state.currentTime = audioEl.currentTime;
 
-            if (hasActiveSelection() && state.currentTime >= state.selectionEnd - 0.015) {
-                handleSelectionBoundaryReached();
+            if (
+                state.dragMode === null &&
+                hasActiveSelection() &&
+                state.currentTime >= state.selectionEnd - 0.015
+            ) {
                 rafId = null;
+                handleSelectionBoundaryReached();
                 return;
             }
 
-            if (state.currentTime > state.viewEnd - 0.25 && state.viewEnd < state.duration) {
-                const span = state.viewEnd - state.viewStart;
-                const nextStart = clamp(
-                    state.currentTime - span * 0.15,
-                    0,
-                    state.duration - span
-                );
-                state.viewStart = nextStart;
-                state.viewEnd = nextStart + span;
+            const span = state.viewEnd - state.viewStart;
+            if (span < state.duration - 0.05 && state.dragMode === null) {
+                const selFitsInView =
+                    hasActiveSelection() &&
+                    state.selectionStart >= state.viewStart &&
+                    state.selectionEnd <= state.viewEnd;
+
+                if (!selFitsInView) {
+                    if (
+                        state.currentTime > state.viewEnd - Math.min(0.25, span * 0.12) &&
+                        state.viewEnd < state.duration
+                    ) {
+                        const nextStart = clamp(
+                            state.currentTime - span * 0.15,
+                            0,
+                            state.duration - span
+                        );
+                        state.viewStart = nextStart;
+                        state.viewEnd = nextStart + span;
+                    } else if (state.currentTime < state.viewStart) {
+                        const nextStart = clamp(
+                            state.currentTime - span * 0.1,
+                            0,
+                            state.duration - span
+                        );
+                        state.viewStart = nextStart;
+                        state.viewEnd = nextStart + span;
+                    }
+                }
             }
 
             updateTimeReadouts();
@@ -1376,6 +1489,9 @@
         });
 
         audioEl.addEventListener("play", function () {
+            if (studentAudioEl && !studentAudioEl.paused) {
+                studentAudioEl.pause();
+            }
             state.isPlaying = true;
             if (hasActiveSelection()) {
                 setStudioStatus(
@@ -1418,31 +1534,56 @@
                 state.currentTime = audioEl.currentTime;
                 updateTimeReadouts();
                 requestRender();
-            } else if (hasActiveSelection() && audioEl.currentTime >= state.selectionEnd) {
-                handleSelectionBoundaryReached();
+            } else {
+                if (
+                    state.dragMode === null &&
+                    hasActiveSelection() &&
+                    audioEl.currentTime >= state.selectionEnd
+                ) {
+                    handleSelectionBoundaryReached();
+                    return;
+                }
+                if (rafId === null) {
+                    startHighFreqMonitor();
+                }
             }
         });
+
+        audioEl.addEventListener(
+            "canplaythrough",
+            function () {
+                decodeHighResWaveformAsync();
+            },
+            { once: true }
+        );
     }
 
+    let hiResDecodeStarted = false;
     function decodeHighResWaveformAsync() {
+        if (hiResDecodeStarted || state.hiResChannelData) return;
+        const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
         const AudioCtx = window.AudioContext || window.webkitAudioContext;
-        if (!AudioCtx || !audioMeta.audioUrl) return;
-        fetch(audioMeta.audioUrl)
+        if ((!OfflineCtx && !AudioCtx) || !audioMeta.audioUrl) return;
+        hiResDecodeStarted = true;
+
+        fetch(audioMeta.audioUrl, { cache: "force-cache" })
             .then(function (res) {
                 return res.arrayBuffer();
             })
             .then(function (buf) {
-                const ctx = new AudioCtx();
+                const ctx = OfflineCtx ? new OfflineCtx(1, 1, 44100) : new AudioCtx();
                 return ctx.decodeAudioData(buf).then(function (audioBuffer) {
                     state.hiResChannelData = audioBuffer.getChannelData(0);
                     state.hiResSampleRate = audioBuffer.sampleRate;
-                    if (typeof ctx.close === "function") {
+                    if (!OfflineCtx && typeof ctx.close === "function") {
                         ctx.close();
                     }
                     requestRender();
                 });
             })
-            .catch(function () {});
+            .catch(function () {
+                hiResDecodeStarted = false;
+            });
     }
 
     // =========================================================================
@@ -1492,6 +1633,9 @@
             const pad = Math.max(0.6, (state.selectionEnd - state.selectionStart) * 0.25);
             state.viewStart = clamp(state.selectionStart - pad, 0, state.duration);
             state.viewEnd = clamp(state.selectionEnd + pad, 0, state.duration);
+            if (state.viewEnd - state.viewStart < 22) {
+                decodeHighResWaveformAsync();
+            }
             requestRender();
         });
     }
@@ -1505,7 +1649,10 @@
     if (nudgeInMinus) {
         nudgeInMinus.addEventListener("click", function () {
             if (!hasActiveSelection()) return;
-            setSelection(state.selectionStart - 0.1, state.selectionEnd);
+            setSelection(state.selectionStart - 0.1, state.selectionEnd, {
+                preserveHint: true,
+                ensureVisible: false
+            });
         });
     }
     if (nudgeInPlus) {
@@ -1513,7 +1660,8 @@
             if (!hasActiveSelection()) return;
             setSelection(
                 Math.min(state.selectionEnd - MIN_SELECTION_SEC, state.selectionStart + 0.1),
-                state.selectionEnd
+                state.selectionEnd,
+                { preserveHint: true, ensureVisible: false }
             );
         });
     }
@@ -1522,14 +1670,18 @@
             if (!hasActiveSelection()) return;
             setSelection(
                 state.selectionStart,
-                Math.max(state.selectionStart + MIN_SELECTION_SEC, state.selectionEnd - 0.1)
+                Math.max(state.selectionStart + MIN_SELECTION_SEC, state.selectionEnd - 0.1),
+                { preserveHint: true, ensureVisible: false }
             );
         });
     }
     if (nudgeOutPlus) {
         nudgeOutPlus.addEventListener("click", function () {
             if (!hasActiveSelection()) return;
-            setSelection(state.selectionStart, state.selectionEnd + 0.1);
+            setSelection(state.selectionStart, state.selectionEnd + 0.1, {
+                preserveHint: true,
+                ensureVisible: false
+            });
         });
     }
 
@@ -1696,13 +1848,42 @@
     }
 
     // Optional Self-Check Microphone Recorder (Uses localized in-app modal instead of alert)
-    const recordSelfBtn = document.getElementById("recordSelfBtn");
-    const studentAudioEl = document.getElementById("studentAudioPlayback");
     let mediaRecorder = null;
     let recordedChunks = [];
+    let isRequestingMic = false;
+    let currentStudentBlobUrl = null;
+
+    function getSupportedRecorderMimeType() {
+        if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
+            return "";
+        }
+        const candidates = [
+            "audio/webm;codecs=opus",
+            "audio/webm",
+            "audio/mp4",
+            "audio/ogg;codecs=opus"
+        ];
+        for (let i = 0; i < candidates.length; i++) {
+            if (MediaRecorder.isTypeSupported(candidates[i])) {
+                return candidates[i];
+            }
+        }
+        return "";
+    }
+
+    if (studentAudioEl) {
+        studentAudioEl.addEventListener("play", function () {
+            cancelShadowWait();
+            if (audioEl && !audioEl.paused) {
+                audioEl.pause();
+            }
+        });
+    }
 
     if (recordSelfBtn && studentAudioEl) {
         recordSelfBtn.addEventListener("click", function () {
+            if (isRequestingMic) return;
+
             if (mediaRecorder && mediaRecorder.state === "recording") {
                 mediaRecorder.stop();
                 recordSelfBtn.classList.remove("recording");
@@ -1710,27 +1891,61 @@
                 return;
             }
 
-            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            if (
+                typeof MediaRecorder === "undefined" ||
+                !navigator.mediaDevices ||
+                !navigator.mediaDevices.getUserMedia
+            ) {
                 openModal("mic-unsupported");
                 return;
             }
 
+            cancelShadowWait();
+            if (audioEl && !audioEl.paused) {
+                audioEl.pause();
+            }
+            if (!studentAudioEl.paused) {
+                studentAudioEl.pause();
+            }
+
+            isRequestingMic = true;
+            recordSelfBtn.disabled = true;
+
             navigator.mediaDevices
                 .getUserMedia({ audio: true })
                 .then(function (stream) {
+                    isRequestingMic = false;
+                    recordSelfBtn.disabled = false;
                     recordedChunks = [];
-                    mediaRecorder = new MediaRecorder(stream);
+
+                    const preferredMime = getSupportedRecorderMimeType();
+                    try {
+                        mediaRecorder = preferredMime
+                            ? new MediaRecorder(stream, { mimeType: preferredMime })
+                            : new MediaRecorder(stream);
+                    } catch (e) {
+                        mediaRecorder = new MediaRecorder(stream);
+                    }
+
                     mediaRecorder.ondataavailable = function (ev) {
                         if (ev.data && ev.data.size > 0) {
                             recordedChunks.push(ev.data);
                         }
                     };
                     mediaRecorder.onstop = function () {
-                        const blob = new Blob(recordedChunks, {
-                            type: mediaRecorder.mimeType || "audio/webm"
-                        });
-                        const url = URL.createObjectURL(blob);
-                        studentAudioEl.src = url;
+                        const chunkType =
+                            (recordedChunks[0] && recordedChunks[0].type) ||
+                            mediaRecorder.mimeType ||
+                            preferredMime ||
+                            "";
+                        const blob = chunkType
+                            ? new Blob(recordedChunks, { type: chunkType })
+                            : new Blob(recordedChunks);
+                        if (currentStudentBlobUrl) {
+                            URL.revokeObjectURL(currentStudentBlobUrl);
+                        }
+                        currentStudentBlobUrl = URL.createObjectURL(blob);
+                        studentAudioEl.src = currentStudentBlobUrl;
                         studentAudioEl.style.display = "block";
                         stream.getTracks().forEach(function (track) {
                             track.stop();
@@ -1741,20 +1956,38 @@
                     recordSelfBtn.textContent = t("recordStopBtn");
                 })
                 .catch(function () {
+                    isRequestingMic = false;
+                    recordSelfBtn.disabled = false;
                     openModal("mic-denied");
                 });
         });
     }
 
     window.addEventListener("keydown", function (ev) {
-        if (ev.target && (ev.target.tagName === "INPUT" || ev.target.tagName === "TEXTAREA")) {
+        if (ev.ctrlKey || ev.metaKey || ev.altKey) {
+            return;
+        }
+        if (
+            ev.target &&
+            (ev.target.tagName === "INPUT" ||
+                ev.target.tagName === "TEXTAREA" ||
+                ev.target.tagName === "SELECT" ||
+                ev.target.tagName === "AUDIO" ||
+                ev.target.isContentEditable)
+        ) {
+            return;
+        }
+        if (state.activeModalKind) {
+            if (ev.code === "Escape") {
+                ev.preventDefault();
+                closeModal();
+            }
             return;
         }
         if (ev.code === "Escape") {
-            if (state.activeModalKind) {
-                closeModal();
-            } else {
+            if (hasActiveSelection()) {
                 setSelection(null, null);
+                setStudioStatus("ready", "statusSelectionCleared", "");
             }
         } else if (ev.code === "Space") {
             ev.preventDefault();
@@ -1784,5 +2017,4 @@
     applyLanguage("ja");
     updateTimeReadouts();
     requestRender();
-    decodeHighResWaveformAsync();
 })();
